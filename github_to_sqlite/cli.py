@@ -499,7 +499,9 @@ def scrape_dependents(db_path, repos, auth, verbose):
                     {
                         "repo": repo_full["id"],
                         "dependent": dependent_id,
-                        "first_seen_utc": datetime.datetime.utcnow().isoformat(),
+                        "first_seen_utc": datetime.datetime.now(datetime.timezone.utc)
+                        .replace(tzinfo=None)
+                        .isoformat(),
                     },
                     pk=("repo", "dependent"),
                     foreign_keys=(
