@@ -142,15 +142,16 @@ def pull_requests(db_path, repo, pull_request_ids, auth, load, orgs, state, sear
     else:
         if orgs:
             repos = itertools.chain.from_iterable(
-                utils.fetch_all_repos(token=token, org=org)
-                for org in orgs
+                utils.fetch_all_repos(token=token, org=org) for org in orgs
             )
         else:
             repos = [utils.fetch_repo(repo, token)]
         for repo_full in repos:
             utils.save_repo(db, repo_full)
             repo = repo_full["full_name"]
-            pull_requests = utils.fetch_pull_requests(repo, state, token, pull_request_ids)
+            pull_requests = utils.fetch_pull_requests(
+                repo, state, token, pull_request_ids
+            )
             utils.save_pull_requests(db, pull_requests, repo_full)
     utils.ensure_db_shape(db)
 
