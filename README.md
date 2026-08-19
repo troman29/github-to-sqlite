@@ -21,6 +21,7 @@ Save data from GitHub to a SQLite database.
 - [Fetching contributors to a repository](#fetching-contributors-to-a-repository)
 - [Fetching repos belonging to a user or organization](#fetching-repos-belonging-to-a-user-or-organization)
 - [Fetching projects and their items](#fetching-projects-and-their-items)
+- [Saving a webhook delivery](#saving-a-webhook-delivery)
 - [Fetching specific repositories](#fetching-specific-repositories)
 - [Fetching repos that have been starred by a user](#fetching-repos-that-have-been-starred-by-a-user)
 - [Fetching users that have starred specific repos](#fetching-users-that-have-starred-specific-repos)
@@ -141,6 +142,17 @@ the underlying issue and a `fields` column holding every custom field value as J
 with Priority or Estimate keeps them without a schema change.
 
 This command talks to the GraphQL API: Projects v2 have no REST equivalent.
+
+## Saving a webhook delivery
+
+`issues`, `issue_comment` and `pull_request` webhooks carry the whole object, so there is nothing
+to fetch: pipe the delivery straight into the database and no API call is made at all.
+
+    $ github-to-sqlite webhook github.db --event issues < payload.json
+
+`--event` takes the value of the `X-GitHub-Event` header; the payload is read from stdin unless
+`--payload` points at a file. An event that carries no object of its own (`push`, for example)
+exits non-zero — refresh those with the regular commands, which are incremental anyway.
 
 ## Fetching releases for a repository
 

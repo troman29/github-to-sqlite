@@ -679,6 +679,37 @@ def projects(db_path, owners, auth, number, closed):
     utils.ensure_db_shape(db)
 
 
+@cli.command()
+@click.argument(
+    "db_path",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+    required=True,
+)
+@click.option("--event", required=True, help="Value of the X-GitHub-Event header")
+@click.option(
+    "--payload", type=click.File("r"), default="-", help="Webhook payload, defaults to stdin"
+)
+def webhook(db_path, event, payload):
+    "Save the object delivered by a GitHub webhook, without calling the API"
+    data = json.load(payload)
+    repo = data.get("repository")
+    if not repo:
+        raise click.ClickException("payload has no repository")
+    db = sqlite_utils.Database(db_path)
+    utils.save_repo(db, repo)
+    if event == "issues" and data.get("issue"):
+        utils.save_issues(db, [data["issue"]], repo)
+    elif event == "pull_request" and data.get("pull_request"):
+        utils.save_pull_requests(db, [data["pull_request"]], repo)
+    elif event == "issue_comment" and data.get("comment"):
+        if data.get("issue"):
+            utils.save_issues(db, [data["issue"]], repo)
+        utils.save_issue_comment(db, data["comment"])
+    else:
+        raise click.ClickException("nothing to save for event {}".format(event))
+    utils.ensure_db_shape(db)
+
+
 def load_token(auth):
     try:
         token = json.load(open(auth))["github_personal_token"]
