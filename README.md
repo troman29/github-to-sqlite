@@ -20,6 +20,7 @@ Save data from GitHub to a SQLite database.
 - [Fetching tags for a repository](#fetching-tags-for-a-repository)
 - [Fetching contributors to a repository](#fetching-contributors-to-a-repository)
 - [Fetching repos belonging to a user or organization](#fetching-repos-belonging-to-a-user-or-organization)
+- [Fetching projects and their items](#fetching-projects-and-their-items)
 - [Fetching specific repositories](#fetching-specific-repositories)
 - [Fetching repos that have been starred by a user](#fetching-repos-that-have-been-starred-by-a-user)
 - [Fetching users that have starred specific repos](#fetching-users-that-have-starred-specific-repos)
@@ -122,6 +123,24 @@ The command accepts one or more repositories.
 By default it will stop as soon as it sees a commit that has previously been retrieved. You can force it to retrieve all commits (including those that have been previously inserted) using `--all`.
 
 Example: [commits table](https://github-to-sqlite.dogsheep.net/github/commits)
+
+## Fetching projects and their items
+
+The `projects` command saves GitHub Projects (v2) of a user or an organization together with their
+items — issues, pull requests and drafts — including the board column each item sits in:
+
+    $ github-to-sqlite projects github.db windbit
+
+Closed projects are skipped unless you pass `--closed`; `-n/--number` limits the run to specific
+project numbers:
+
+    $ github-to-sqlite projects github.db windbit -n 3
+
+Items land in `project_items` with `status` (the Status field), `assignees`, the `repo`/`number` of
+the underlying issue and a `fields` column holding every custom field value as JSON — so a board
+with Priority or Estimate keeps them without a schema change.
+
+This command talks to the GraphQL API: Projects v2 have no REST equivalent.
 
 ## Fetching releases for a repository
 

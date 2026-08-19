@@ -640,6 +640,45 @@ def workflows(db_path, repos, auth):
     utils.ensure_db_shape(db)
 
 
+@cli.command()
+@click.argument(
+    "db_path",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+    required=True,
+)
+@click.argument("owners", type=str, nargs=-1, required=True)
+@click.option(
+    "-a",
+    "--auth",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=True),
+    default="auth.json",
+    help="Path to auth.json token file",
+)
+@click.option(
+    "-n",
+    "--number",
+    type=int,
+    multiple=True,
+    help="Project numbers to fetch, defaults to every project of the owner",
+)
+@click.option("--closed", is_flag=True, help="Include closed projects")
+def projects(db_path, owners, auth, number, closed):
+    "Save GitHub Projects (v2) and their items for the specified users or organizations"
+    db = sqlite_utils.Database(db_path)
+    token = load_token(auth)
+    for owner in owners:
+        for project in utils.fetch_projects(owner, token):
+            if number and project["number"] not in number:
+                continue
+            if project["closed"] and not closed:
+                continue
+            project_id = utils.save_project(db, owner, project)
+            items = utils.fetch_project_items(owner, project["number"], token)
+            count = utils.save_project_items(db, project_id, items)
+            click.echo("{}/{}: {} items".format(owner, project["title"], count))
+    utils.ensure_db_shape(db)
+
+
 def load_token(auth):
     try:
         token = json.load(open(auth))["github_personal_token"]

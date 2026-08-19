@@ -1,3 +1,4 @@
+import json
 import base64
 import requests
 import re
@@ -910,3 +911,156 @@ def save_workflow(db, repo_id, filename, content):
             pk="id",
             foreign_keys=["job", "repo"],
         )
+
+
+GRAPHQL_URL = "https://api.github.com/graphql"
+
+PROJECTS_QUERY = """
+query($owner: String!, $cursor: String) {
+  repositoryOwner(login: $owner) {
+    ... on ProjectV2Owner {
+      projectsV2(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id number title url closed public createdAt updatedAt }
+      }
+    }
+  }
+}
+"""
+
+PROJECT_ITEMS_QUERY = """
+query($owner: String!, $number: Int!, $cursor: String) {
+  repositoryOwner(login: $owner) {
+    ... on ProjectV2Owner {
+      projectV2(number: $number) {
+        items(first: 100, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id type createdAt updatedAt
+            fieldValues(first: 30) { nodes {
+              ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldUserValue { users(first: 10) { nodes { login } } field { ... on ProjectV2FieldCommon { name } } }
+            } }
+            content {
+              ... on Issue { number title url state repository { nameWithOwner } }
+              ... on PullRequest { number title url state repository { nameWithOwner } }
+              ... on DraftIssue { title }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+FIELD_VALUE_KEYS = ("text", "number", "date", "name", "title")
+
+
+def graphql(query, variables, token):
+    response = requests.post(
+        GRAPHQL_URL,
+        json={"query": query, "variables": variables},
+        headers=make_headers(token),
+    )
+    if response.status_code != 200:
+        raise GitHubError.from_response(response)
+    data = response.json()
+    if data.get("errors"):
+        raise GitHubError(data["errors"][0].get("message", "GraphQL error"), 200)
+    return data["data"]
+
+
+def field_values(nodes):
+    values = {}
+    for node in nodes:
+        name = (node.get("field") or {}).get("name")
+        if not name:
+            continue
+        if "users" in node:
+            values[name] = ", ".join(user["login"] for user in node["users"]["nodes"])
+            continue
+        for key in FIELD_VALUE_KEYS:
+            if key in node:
+                values[name] = node[key]
+                break
+    return values
+
+
+def fetch_projects(owner, token):
+    cursor = None
+    while True:
+        owner_data = graphql(PROJECTS_QUERY, {"owner": owner, "cursor": cursor}, token)["repositoryOwner"]
+        if not owner_data:
+            return
+        page = owner_data["projectsV2"]
+        yield from page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            return
+        cursor = page["pageInfo"]["endCursor"]
+
+
+def fetch_project_items(owner, number, token):
+    cursor = None
+    while True:
+        owner_data = graphql(
+            PROJECT_ITEMS_QUERY, {"owner": owner, "number": number, "cursor": cursor}, token
+        )["repositoryOwner"]
+        project = (owner_data or {}).get("projectV2")
+        if not project:
+            return
+        page = project["items"]
+        yield from page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            return
+        cursor = page["pageInfo"]["endCursor"]
+
+
+def save_project(db, owner, project):
+    row = {
+        "id": project["id"],
+        "owner": owner,
+        "number": project["number"],
+        "title": project["title"],
+        "url": project["url"],
+        "closed": project["closed"],
+        "public": project.get("public"),
+        "created_at": project["createdAt"],
+        "updated_at": project["updatedAt"],
+    }
+    db["projects"].insert(row, pk="id", alter=True, replace=True)
+    return row["id"]
+
+
+def save_project_items(db, project_id, items):
+    rows = []
+    for item in items:
+        content = item.get("content") or {}
+        values = field_values(item["fieldValues"]["nodes"])
+        repository = (content.get("repository") or {}).get("nameWithOwner")
+        rows.append(
+            {
+                "id": item["id"],
+                "project": project_id,
+                "type": item["type"],
+                "repo": repository,
+                "number": content.get("number"),
+                "title": content.get("title") or values.get("Title"),
+                "url": content.get("url"),
+                "state": content.get("state"),
+                "status": values.get("Status"),
+                "assignees": values.get("Assignees"),
+                "fields": json.dumps(values, ensure_ascii=False),
+                "created_at": item["createdAt"],
+                "updated_at": item["updatedAt"],
+            }
+        )
+    if rows:
+        db["project_items"].insert_all(
+            rows, pk="id", alter=True, replace=True, foreign_keys=[("project", "projects", "id")]
+        )
+    return len(rows)
