@@ -696,15 +696,21 @@ def save_commit_author(db, raw_author):
 def ensure_foreign_keys(db):
     for expected_foreign_key in FOREIGN_KEYS:
         table, column, table2, column2 = expected_foreign_key
-        if (
-            expected_foreign_key not in db[table].foreign_keys
-            and
-            # Ensure all tables and columns exist
+        # Ensure all tables and columns exist
+        if not (
             db[table].exists()
             and db[table2].exists()
             and column in db[table].columns_dict
             and column2 in db[table2].columns_dict
         ):
+            continue
+        # sqlite-utils carries more than four fields on ForeignKey (on_delete, is_compound, ...),
+        # so a plain 4-tuple never matches one and every run tried to re-add an existing key.
+        existing = {
+            (fk.table, fk.column, fk.other_table, fk.other_column)
+            for fk in db[table].foreign_keys
+        }
+        if expected_foreign_key not in existing:
             db[table].add_foreign_key(column, table2, column2)
 
 
