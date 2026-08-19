@@ -121,9 +121,9 @@ def save_issues(db, issues, repo):
         # Extract milestone
         if issue["milestone"]:
             issue["milestone"] = save_milestone(db, issue["milestone"], repo["id"])
-        # For the moment we ignore the assignees=[] array but we DO turn assignee
-        # singular into a foreign key reference
-        issue.pop("assignees", None)
+        # Исполнителей у задачи может быть несколько, а внешний ключ — один: singular остаётся
+        # ссылкой, остальные ложатся строкой логинов, иначе второй исполнитель терялся молча.
+        issue["assignees"] = assignee_logins(issue.pop("assignees", None))
         if issue["assignee"]:
             issue["assignee"] = save_user(db, issue["assignee"])
         # Add a type field to distinguish issues from pulls
@@ -192,9 +192,8 @@ def save_pull_requests(db, pull_requests, repo):
             pull_request["milestone"] = save_milestone(
                 db, pull_request["milestone"], repo["id"]
             )
-        # For the moment we ignore the assignees=[] array but we DO turn assignee
-        # singular into a foreign key reference
-        pull_request.pop("assignees", None)
+        pull_request["assignees"] = assignee_logins(pull_request.pop("assignees", None))
+        pull_request["reviewers"] = assignee_logins(pull_request.get("requested_reviewers"))
         if original["assignee"]:
             pull_request["assignee"] = save_user(db, pull_request["assignee"])
         pull_request.pop("active_lock_reason")
@@ -238,6 +237,10 @@ def prune_labels(db, m2m_table, column, row_id, labels):
     if keep:
         sql += " and labels_id not in ({})".format(",".join("?" * len(keep)))
     db[m2m_table].delete_where(sql, [row_id, *keep])
+
+
+def assignee_logins(users):
+    return ", ".join(user["login"] for user in users or []) or None
 
 
 def save_user(db, user):
@@ -1082,4 +1085,74 @@ def save_project_items(db, project_id, items):
         if keep:
             sql += " and id not in ({})".format(",".join("?" * len(keep)))
         db["project_items"].delete_where(sql, [project_id, *keep])
+    return len(rows)
+
+
+BRANCHES_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    refs(refPrefix: "refs/heads/", first: 100, after: $cursor,
+         orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        target { ... on Commit { oid committedDate messageHeadline author { name user { login } } } }
+        associatedPullRequests(first: 1, states: [OPEN, MERGED]) { nodes { number state url } }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_branches(full_name, token):
+    owner, name = full_name.split("/")
+    cursor, default = None, None
+    while True:
+        repository = graphql(BRANCHES_QUERY, {"owner": owner, "name": name, "cursor": cursor}, token)["repository"]
+        if not repository:
+            return
+        default = default or (repository["defaultBranchRef"] or {}).get("name")
+        page = repository["refs"]
+        for ref in page["nodes"]:
+            yield {**ref, "default": ref["name"] == default}
+        if not page["pageInfo"]["hasNextPage"]:
+            return
+        cursor = page["pageInfo"]["endCursor"]
+
+
+def save_branches(db, repo_id, branches):
+    if "repos" not in db.table_names():
+        db["repos"].create({"id": int}, pk="id")  # чтобы внешний ключ было куда повесить
+    rows = []
+    for branch in branches:
+        target = branch.get("target") or {}
+        author = target.get("author") or {}
+        pulls = branch["associatedPullRequests"]["nodes"]
+        rows.append(
+            {
+                "id": "{}:{}".format(repo_id, branch["name"]),
+                "repo": repo_id,
+                "name": branch["name"],
+                "default": branch["default"],
+                "sha": target.get("oid"),
+                "committed_at": target.get("committedDate"),
+                "message": target.get("messageHeadline"),
+                "author": (author.get("user") or {}).get("login") or author.get("name"),
+                "pull_request": pulls[0]["number"] if pulls else None,
+                "pull_request_state": pulls[0]["state"] if pulls else None,
+            }
+        )
+    if rows:
+        db["branches"].insert_all(
+            rows, pk="id", alter=True, replace=True, foreign_keys=[("repo", "repos", "id")]
+        )
+    # Ветку могли удалить после мержа — список приходит целиком, значит лишнее уходит.
+    if db["branches"].exists():
+        keep = [row["id"] for row in rows]
+        sql = "repo = ?"
+        if keep:
+            sql += " and id not in ({})".format(",".join("?" * len(keep)))
+        db["branches"].delete_where(sql, [repo_id, *keep])
     return len(rows)

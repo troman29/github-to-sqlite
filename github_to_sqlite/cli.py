@@ -706,6 +706,8 @@ def webhook(db_path, event, payload):
             utils.save_issues(db, [data["issue"]], repo)
     elif event == "pull_request" and data.get("pull_request"):
         utils.save_pull_requests(db, [data["pull_request"]], repo)
+    elif event == "repository":
+        pass  # save_repo выше — это и есть всё содержимое события
     elif event == "issue_comment" and data.get("comment"):
         if data.get("issue") and not deleted:
             utils.save_issues(db, [data["issue"]], repo)
@@ -715,6 +717,31 @@ def webhook(db_path, event, payload):
             utils.save_issue_comment(db, data["comment"])
     else:
         raise click.ClickException("nothing to save for event {}".format(event))
+    utils.ensure_db_shape(db)
+
+
+@cli.command()
+@click.argument(
+    "db_path",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+    required=True,
+)
+@click.argument("repos", type=str, nargs=-1, required=True)
+@click.option(
+    "-a",
+    "--auth",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=True),
+    default="auth.json",
+    help="Path to auth.json token file",
+)
+def branches(db_path, repos, auth):
+    "Save branches for the specified repos, with their head commit and pull request"
+    db = sqlite_utils.Database(db_path)
+    token = load_token(auth)
+    for full_name in repos:
+        repo_id = utils.save_repo(db, utils.fetch_repo(full_name, token))
+        count = utils.save_branches(db, repo_id, utils.fetch_branches(full_name, token))
+        click.echo("{}: {} branches".format(full_name, count))
     utils.ensure_db_shape(db)
 
 

@@ -71,6 +71,8 @@ def test_pull_requests(db):
             "merged_at": "2019-09-03T00:32:28Z",
             "merge_commit_sha": "2dc5c8dc259a0606162673d394ba8cc1c6f54428",
             "assignee": None,
+            "assignees": None,
+            "reviewers": None,
             "milestone": None,
             "draft": 0,
             "head": "a85239f69261c10f1a9f90514c8b5d113cb94585",

@@ -16,6 +16,7 @@ Save data from GitHub to a SQLite database.
 - [Fetching pull requests for a repository](#fetching-pull-requests-for-a-repository)
 - [Fetching issue comments for a repository](#fetching-issue-comments-for-a-repository)
 - [Fetching commits for a repository](#fetching-commits-for-a-repository)
+- [Fetching branches for a repository](#fetching-branches-for-a-repository)
 - [Fetching releases for a repository](#fetching-releases-for-a-repository)
 - [Fetching tags for a repository](#fetching-tags-for-a-repository)
 - [Fetching contributors to a repository](#fetching-contributors-to-a-repository)
@@ -158,6 +159,14 @@ Every action of those events is covered, because the payload always carries the 
 a renamed title, a label added or removed, an assignee, a closed issue. A `deleted` action removes
 the row instead of saving it, and labels are stored as the object's current set — a label taken off
 an issue disappears from `issues_labels` rather than lingering.
+
+## Fetching branches for a repository
+
+    $ github-to-sqlite branches github.db windbit/agentek-console
+
+Each branch is saved with its head commit (sha, date, headline, author) and the pull request it
+belongs to, if any — enough to tell a merged leftover from work in progress without cloning. One
+GraphQL call per 100 branches. A branch that no longer exists is removed from the table.
 
 ## Fetching releases for a repository
 
