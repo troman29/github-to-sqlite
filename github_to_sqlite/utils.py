@@ -149,7 +149,7 @@ def save_issues(db, issues, repo):
                 "body": str,
             },
         )
-        # m2m for labels
+        prune_labels(db, "issues_labels", "issues_id", issue["id"], labels)
         for label in labels:
             table.m2m("labels", label, pk="id")
 
@@ -224,9 +224,20 @@ def save_pull_requests(db, pull_requests, repo):
                 "merged_by": int,
             },
         )
-        # m2m for labels
+        prune_labels(db, "labels_pull_requests", "pull_requests_id", pull_request["id"], labels)
         for label in labels:
             table.m2m("labels", label, pk="id")
+
+
+def prune_labels(db, m2m_table, column, row_id, labels):
+    """Лейблы — ТЕКУЩИЙ набор объекта: снятый обязан исчезнуть, иначе m2m копит уже снятые."""
+    if not db[m2m_table].exists():
+        return
+    keep = [label["id"] for label in labels]
+    sql = "{} = ?".format(column)
+    if keep:
+        sql += " and labels_id not in ({})".format(",".join("?" * len(keep)))
+    db[m2m_table].delete_where(sql, [row_id, *keep])
 
 
 def save_user(db, user):
@@ -1063,4 +1074,12 @@ def save_project_items(db, project_id, items):
         db["project_items"].insert_all(
             rows, pk="id", alter=True, replace=True, foreign_keys=[("project", "projects", "id")]
         )
+    # Карточку могли снять с доски или перенести в другой проект — прогон видит проект целиком,
+    # поэтому всё, чего в нём больше нет, из зеркала уходит.
+    if db["project_items"].exists():
+        keep = [row["id"] for row in rows]
+        sql = "project = ?"
+        if keep:
+            sql += " and id not in ({})".format(",".join("?" * len(keep)))
+        db["project_items"].delete_where(sql, [project_id, *keep])
     return len(rows)

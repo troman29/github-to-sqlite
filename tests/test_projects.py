@@ -73,6 +73,14 @@ def test_save_project_items():
     assert db["projects"].get(project_id)["title"] == "Agentek"
 
 
+def test_item_removed_from_the_board_disappears():
+    db = sqlite_utils.Database(memory=True)
+    project_id = utils.save_project(db, "windbit", PROJECT)
+    utils.save_project_items(db, project_id, [ITEM, DRAFT])
+    utils.save_project_items(db, project_id, [ITEM])
+    assert [row["id"] for row in db["project_items"].rows] == ["PVTI_1"]
+
+
 def test_items_are_replaced_not_duplicated():
     db = sqlite_utils.Database(memory=True)
     project_id = utils.save_project(db, "windbit", PROJECT)

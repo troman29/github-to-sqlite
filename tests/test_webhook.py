@@ -71,6 +71,25 @@ def test_second_delivery_updates_the_same_row(tmp_path):
 
 
 
+def test_removed_label_disappears(tmp_path):
+    db_path = str(tmp_path / "github.db")
+    bug = {"id": 1, "name": "bug", "color": "red", "default": False, "description": None}
+    urgent = {"id": 2, "name": "urgent", "color": "red", "default": False, "description": None}
+    for labels in ([bug, urgent], [bug]):
+        payload = {"action": "unlabeled", "issue": {**issue(), "labels": labels}, "repository": REPO}
+        CliRunner().invoke(cli.cli, ["webhook", db_path, "--event", "issues"], input=json.dumps(payload))
+    db = sqlite_utils.Database(db_path)
+    assert [row["labels_id"] for row in db["issues_labels"].rows] == [1]
+
+
+def test_deleted_issue_is_removed(tmp_path):
+    db_path = str(tmp_path / "github.db")
+    for action in ("opened", "deleted"):
+        payload = {"action": action, "issue": issue(), "repository": REPO}
+        CliRunner().invoke(cli.cli, ["webhook", db_path, "--event", "issues"], input=json.dumps(payload))
+    assert sqlite_utils.Database(db_path)["issues"].count == 0
+
+
 def test_unknown_event_fails_loudly(tmp_path):
     result, _ = run(tmp_path, "star", {"repository": REPO})
     assert result.exit_code != 0

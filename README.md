@@ -154,6 +154,11 @@ to fetch: pipe the delivery straight into the database and no API call is made a
 `--payload` points at a file. An event that carries no object of its own (`push`, for example)
 exits non-zero — refresh those with the regular commands, which are incremental anyway.
 
+Every action of those events is covered, because the payload always carries the current object:
+a renamed title, a label added or removed, an assignee, a closed issue. A `deleted` action removes
+the row instead of saving it, and labels are stored as the object's current set — a label taken off
+an issue disappears from `issues_labels` rather than lingering.
+
 ## Fetching releases for a repository
 
 The `releases` command retrieves the releases for one or more repositories.

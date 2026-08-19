@@ -697,14 +697,22 @@ def webhook(db_path, event, payload):
         raise click.ClickException("payload has no repository")
     db = sqlite_utils.Database(db_path)
     utils.save_repo(db, repo)
+    # Удаление приходит тем же событием: зеркало обязано терять то, чего в GitHub больше нет.
+    deleted = data.get("action") == "deleted"
     if event == "issues" and data.get("issue"):
-        utils.save_issues(db, [data["issue"]], repo)
+        if deleted:
+            db["issues"].delete_where("id = ?", [data["issue"]["id"]])
+        else:
+            utils.save_issues(db, [data["issue"]], repo)
     elif event == "pull_request" and data.get("pull_request"):
         utils.save_pull_requests(db, [data["pull_request"]], repo)
     elif event == "issue_comment" and data.get("comment"):
-        if data.get("issue"):
+        if data.get("issue") and not deleted:
             utils.save_issues(db, [data["issue"]], repo)
-        utils.save_issue_comment(db, data["comment"])
+        if deleted:
+            db["issue_comments"].delete_where("id = ?", [data["comment"]["id"]])
+        else:
+            utils.save_issue_comment(db, data["comment"])
     else:
         raise click.ClickException("nothing to save for event {}".format(event))
     utils.ensure_db_shape(db)
