@@ -1,3 +1,4 @@
+import json
 import base64
 import requests
 import re
@@ -120,12 +121,15 @@ def save_issues(db, issues, repo):
         # Extract milestone
         if issue["milestone"]:
             issue["milestone"] = save_milestone(db, issue["milestone"], repo["id"])
-        # For the moment we ignore the assignees=[] array but we DO turn assignee
-        # singular into a foreign key reference
-        issue.pop("assignees", None)
+        # Исполнителей у задачи может быть несколько, а внешний ключ — один: singular остаётся
+        # ссылкой, остальные ложатся строкой логинов, иначе второй исполнитель терялся молча.
+        issue["assignees"] = assignee_logins(issue.pop("assignees", None))
         if issue["assignee"]:
             issue["assignee"] = save_user(db, issue["assignee"])
-        # Add a type field to distinguish issues from pulls
+        # GitHub с 2025-го отдаёт СВОЙ type (Task, Bug, Epic…) — тем же именем, каким тула метит
+        # задачу против PR. Забираем его отдельной колонкой, иначе он затирается меткой.
+        original_type = issue.get("type")
+        issue["issue_type"] = original_type.get("name") if isinstance(original_type, dict) else None
         issue["type"] = "pull" if issue.get("pull_request") else "issue"
         # Insert record
         table = db["issues"].insert(
@@ -148,9 +152,31 @@ def save_issues(db, issues, repo):
                 "body": str,
             },
         )
-        # m2m for labels
+        prune_labels(db, "issues_labels", "issues_id", issue["id"], labels)
         for label in labels:
             table.m2m("labels", label, pk="id")
+
+
+# Статистику диффа и счётчики списочная ручка PR не отдаёт — они приезжают только из детальной
+# ручки и из вебхука. `replace=True` ниже затирает колонку, которой нет в записи, поэтому уже
+# известные значения переносим в новую запись руками.
+PR_DETAIL_ONLY = ("additions", "deletions", "changed_files", "commits", "comments",
+                  "review_comments", "maintainer_can_modify", "mergeable", "mergeable_state",
+                  "rebaseable", "merged")
+
+
+def keep_pull_request_details(db, pull_request):
+    if not db["pull_requests"].exists():
+        return
+    missing = [column for column in PR_DETAIL_ONLY if pull_request.get(column) is None]
+    if not missing:
+        return
+    known = list(db["pull_requests"].rows_where("id = ?", [pull_request["id"]]))
+    if not known:
+        return
+    for column in missing:
+        if known[0].get(column) is not None:
+            pull_request[column] = known[0][column]
 
 
 def save_pull_requests(db, pull_requests, repo):
@@ -191,15 +217,15 @@ def save_pull_requests(db, pull_requests, repo):
             pull_request["milestone"] = save_milestone(
                 db, pull_request["milestone"], repo["id"]
             )
-        # For the moment we ignore the assignees=[] array but we DO turn assignee
-        # singular into a foreign key reference
-        pull_request.pop("assignees", None)
+        pull_request["assignees"] = assignee_logins(pull_request.pop("assignees", None))
+        pull_request["reviewers"] = assignee_logins(pull_request.get("requested_reviewers"))
         if original["assignee"]:
             pull_request["assignee"] = save_user(db, pull_request["assignee"])
         pull_request.pop("active_lock_reason")
         # ignore requested_reviewers and requested_teams
         pull_request.pop("requested_reviewers", None)
         pull_request.pop("requested_teams", None)
+        keep_pull_request_details(db, pull_request)
         # Insert record
         table = db["pull_requests"].insert(
             pull_request,
@@ -223,9 +249,24 @@ def save_pull_requests(db, pull_requests, repo):
                 "merged_by": int,
             },
         )
-        # m2m for labels
+        prune_labels(db, "labels_pull_requests", "pull_requests_id", pull_request["id"], labels)
         for label in labels:
             table.m2m("labels", label, pk="id")
+
+
+def prune_labels(db, m2m_table, column, row_id, labels):
+    """Лейблы — ТЕКУЩИЙ набор объекта: снятый обязан исчезнуть, иначе m2m копит уже снятые."""
+    if not db[m2m_table].exists():
+        return
+    keep = [label["id"] for label in labels]
+    sql = "{} = ?".format(column)
+    if keep:
+        sql += " and labels_id not in ({})".format(",".join("?" * len(keep)))
+    db[m2m_table].delete_where(sql, [row_id, *keep])
+
+
+def assignee_logins(users):
+    return ", ".join(user["login"] for user in users or []) or None
 
 
 def save_user(db, user):
@@ -696,15 +737,21 @@ def save_commit_author(db, raw_author):
 def ensure_foreign_keys(db):
     for expected_foreign_key in FOREIGN_KEYS:
         table, column, table2, column2 = expected_foreign_key
-        if (
-            expected_foreign_key not in db[table].foreign_keys
-            and
-            # Ensure all tables and columns exist
+        # Ensure all tables and columns exist
+        if not (
             db[table].exists()
             and db[table2].exists()
             and column in db[table].columns_dict
             and column2 in db[table2].columns_dict
         ):
+            continue
+        # sqlite-utils carries more than four fields on ForeignKey (on_delete, is_compound, ...),
+        # so a plain 4-tuple never matches one and every run tried to re-add an existing key.
+        existing = {
+            (fk.table, fk.column, fk.other_table, fk.other_column)
+            for fk in db[table].foreign_keys
+        }
+        if expected_foreign_key not in existing:
             db[table].add_foreign_key(column, table2, column2)
 
 
@@ -904,3 +951,343 @@ def save_workflow(db, repo_id, filename, content):
             pk="id",
             foreign_keys=["job", "repo"],
         )
+
+
+GRAPHQL_URL = "https://api.github.com/graphql"
+
+PROJECTS_QUERY = """
+query($owner: String!, $cursor: String) {
+  repositoryOwner(login: $owner) {
+    ... on ProjectV2Owner {
+      projectsV2(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id number title url closed public createdAt updatedAt }
+      }
+    }
+  }
+}
+"""
+
+PROJECT_ITEMS_QUERY = """
+query($owner: String!, $number: Int!, $cursor: String) {
+  repositoryOwner(login: $owner) {
+    ... on ProjectV2Owner {
+      projectV2(number: $number) {
+        items(first: 100, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id type createdAt updatedAt
+            fieldValues(first: 30) { nodes {
+              ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } }
+              ... on ProjectV2ItemFieldUserValue { users(first: 10) { nodes { login } } field { ... on ProjectV2FieldCommon { name } } }
+            } }
+            content {
+              ... on Issue { number title url state repository { nameWithOwner } }
+              ... on PullRequest { number title url state repository { nameWithOwner } }
+              ... on DraftIssue { title }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+FIELD_VALUE_KEYS = ("text", "number", "date", "name", "title")
+
+
+def graphql(query, variables, token):
+    response = requests.post(
+        GRAPHQL_URL,
+        json={"query": query, "variables": variables},
+        headers=make_headers(token),
+    )
+    if response.status_code != 200:
+        raise GitHubError.from_response(response)
+    data = response.json()
+    if data.get("errors"):
+        raise GitHubError(data["errors"][0].get("message", "GraphQL error"), 200)
+    return data["data"]
+
+
+def field_values(nodes):
+    values = {}
+    for node in nodes:
+        name = (node.get("field") or {}).get("name")
+        if not name:
+            continue
+        if "users" in node:
+            values[name] = ", ".join(user["login"] for user in node["users"]["nodes"])
+            continue
+        for key in FIELD_VALUE_KEYS:
+            if key in node:
+                values[name] = node[key]
+                break
+    return values
+
+
+def fetch_projects(owner, token):
+    cursor = None
+    while True:
+        owner_data = graphql(PROJECTS_QUERY, {"owner": owner, "cursor": cursor}, token)["repositoryOwner"]
+        if not owner_data:
+            return
+        page = owner_data["projectsV2"]
+        yield from page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            return
+        cursor = page["pageInfo"]["endCursor"]
+
+
+def fetch_project_items(owner, number, token):
+    cursor = None
+    while True:
+        owner_data = graphql(
+            PROJECT_ITEMS_QUERY, {"owner": owner, "number": number, "cursor": cursor}, token
+        )["repositoryOwner"]
+        project = (owner_data or {}).get("projectV2")
+        if not project:
+            return
+        page = project["items"]
+        yield from page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            return
+        cursor = page["pageInfo"]["endCursor"]
+
+
+def save_project(db, owner, project):
+    row = {
+        "id": project["id"],
+        "owner": owner,
+        "number": project["number"],
+        "title": project["title"],
+        "url": project["url"],
+        "closed": project["closed"],
+        "public": project.get("public"),
+        "created_at": project["createdAt"],
+        "updated_at": project["updatedAt"],
+    }
+    db["projects"].insert(row, pk="id", alter=True, replace=True)
+    return row["id"]
+
+
+def save_project_items(db, project_id, items):
+    rows = []
+    for item in items:
+        content = item.get("content") or {}
+        values = field_values(item["fieldValues"]["nodes"])
+        repository = (content.get("repository") or {}).get("nameWithOwner")
+        rows.append(
+            {
+                "id": item["id"],
+                "project": project_id,
+                "type": item["type"],
+                "repo": repository,
+                "number": content.get("number"),
+                "title": content.get("title") or values.get("Title"),
+                "url": content.get("url"),
+                "state": content.get("state"),
+                "status": values.get("Status"),
+                "assignees": values.get("Assignees"),
+                "fields": json.dumps(values, ensure_ascii=False),
+                "created_at": item["createdAt"],
+                "updated_at": item["updatedAt"],
+            }
+        )
+    if rows:
+        db["project_items"].insert_all(
+            rows, pk="id", alter=True, replace=True, foreign_keys=[("project", "projects", "id")]
+        )
+    # Карточку могли снять с доски или перенести в другой проект — прогон видит проект целиком,
+    # поэтому всё, чего в нём больше нет, из зеркала уходит.
+    if db["project_items"].exists():
+        keep = [row["id"] for row in rows]
+        sql = "project = ?"
+        if keep:
+            sql += " and id not in ({})".format(",".join("?" * len(keep)))
+        db["project_items"].delete_where(sql, [project_id, *keep])
+    return len(rows)
+
+
+BRANCHES_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    refs(refPrefix: "refs/heads/", first: 100, after: $cursor,
+         orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        target { ... on Commit { oid committedDate messageHeadline author { name user { login } } } }
+        associatedPullRequests(first: 1, states: [OPEN, MERGED]) { nodes { number state url } }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_branches(full_name, token):
+    owner, name = full_name.split("/")
+    cursor, default = None, None
+    while True:
+        repository = graphql(BRANCHES_QUERY, {"owner": owner, "name": name, "cursor": cursor}, token)["repository"]
+        if not repository:
+            return
+        default = default or (repository["defaultBranchRef"] or {}).get("name")
+        page = repository["refs"]
+        for ref in page["nodes"]:
+            yield {**ref, "default": ref["name"] == default}
+        if not page["pageInfo"]["hasNextPage"]:
+            return
+        cursor = page["pageInfo"]["endCursor"]
+
+
+def save_branches(db, repo_id, branches):
+    if "repos" not in db.table_names():
+        db["repos"].create({"id": int}, pk="id")  # чтобы внешний ключ было куда повесить
+    rows = []
+    for branch in branches:
+        target = branch.get("target") or {}
+        author = target.get("author") or {}
+        pulls = branch["associatedPullRequests"]["nodes"]
+        rows.append(
+            {
+                "id": "{}:{}".format(repo_id, branch["name"]),
+                "repo": repo_id,
+                "name": branch["name"],
+                "default": branch["default"],
+                "sha": target.get("oid"),
+                "committed_at": target.get("committedDate"),
+                "message": target.get("messageHeadline"),
+                "author": (author.get("user") or {}).get("login") or author.get("name"),
+                "pull_request": pulls[0]["number"] if pulls else None,
+                "pull_request_state": pulls[0]["state"] if pulls else None,
+            }
+        )
+    if rows:
+        db["branches"].insert_all(
+            rows, pk="id", alter=True, replace=True, foreign_keys=[("repo", "repos", "id")]
+        )
+    # Ветку могли удалить после мержа — список приходит целиком, значит лишнее уходит.
+    if db["branches"].exists():
+        keep = [row["id"] for row in rows]
+        sql = "repo = ?"
+        if keep:
+            sql += " and id not in ({})".format(",".join("?" * len(keep)))
+        db["branches"].delete_where(sql, [repo_id, *keep])
+    return len(rows)
+
+
+REVIEWS_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 25, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        reviews(first: 20) {
+          nodes { databaseId state body submittedAt url author { login } commit { oid } }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_reviews(full_name, token, pages=None):
+    """Вердикты ревью пачкой: по REST их отдают только поштучно на каждый PR, это сотни запросов."""
+    owner, name = full_name.split("/")
+    cursor, page = None, 0
+    while pages is None or page < pages:
+        repository = graphql(REVIEWS_QUERY, {"owner": owner, "name": name, "cursor": cursor}, token)["repository"]
+        if not repository:
+            return
+        chunk = repository["pullRequests"]
+        for pull_request in chunk["nodes"]:
+            for review in pull_request["reviews"]["nodes"]:
+                yield pull_request["number"], review
+        page += 1
+        if not chunk["pageInfo"]["hasNextPage"]:
+            return
+        cursor = chunk["pageInfo"]["endCursor"]
+
+
+def ensure_review_tables(db):
+    # Ревью может приехать вебхуком раньше, чем синк создаст сами таблицы, — вешать внешний
+    # ключ будет некуда; заводим заглушки, как это делает save_issues для milestones.
+    for table, columns in (("repos", {"id": int}), ("pull_requests", {"id": int, "repo": int, "number": int})):
+        if table not in db.table_names():
+            db[table].create(columns, pk="id")
+
+
+def pull_request_id(db, repo_id, number):
+    rows = list(db["pull_requests"].rows_where("repo = ? and number = ?", [repo_id, number]))
+    return rows[0]["id"] if rows else None
+
+
+def save_reviews(db, repo_id, reviews):
+    ensure_review_tables(db)
+    rows = []
+    for number, review in reviews:
+        if not review.get("databaseId"):
+            continue
+        rows.append(
+            {
+                "id": review["databaseId"],
+                "pull_request": pull_request_id(db, repo_id, number),
+                "repo": repo_id,
+                "number": number,
+                "state": review["state"],
+                "body": review.get("body") or None,
+                "author": (review.get("author") or {}).get("login"),
+                "submitted_at": review.get("submittedAt"),
+                "commit": (review.get("commit") or {}).get("oid"),
+                "url": review.get("url"),
+            }
+        )
+    if rows:
+        db["reviews"].insert_all(rows, pk="id", alter=True, replace=True,
+                                 foreign_keys=[("pull_request", "pull_requests", "id"), ("repo", "repos", "id")])
+    return len(rows)
+
+
+def save_review_comments(db, repo_id, comments):
+    ensure_review_tables(db)
+    rows = []
+    for comment in comments:
+        number = int(comment["pull_request_url"].rsplit("/", 1)[1])
+        rows.append(
+            {
+                "id": comment["id"],
+                "review": comment.get("pull_request_review_id"),
+                "pull_request": pull_request_id(db, repo_id, number),
+                "repo": repo_id,
+                "number": number,
+                "author": (comment.get("user") or {}).get("login"),
+                "path": comment.get("path"),
+                "line": comment.get("line") or comment.get("original_line"),
+                "body": comment.get("body"),
+                "created_at": comment.get("created_at"),
+                "updated_at": comment.get("updated_at"),
+                "url": comment.get("html_url"),
+                "in_reply_to": comment.get("in_reply_to_id"),
+            }
+        )
+    if rows:
+        db["review_comments"].insert_all(rows, pk="id", alter=True, replace=True,
+                                         foreign_keys=[("pull_request", "pull_requests", "id"), ("repo", "repos", "id")])
+    return len(rows)
+
+
+def fetch_review_comments(full_name, token):
+    """Инлайновые замечания отдаются ЦЕЛИКОМ по репозиторию — не надо ходить по каждому PR."""
+    url = "https://api.github.com/repos/{}/pulls/comments".format(full_name)
+    for page in paginate(url, make_headers(token)):  # paginate отдаёт СТРАНИЦЫ, не элементы
+        yield from page

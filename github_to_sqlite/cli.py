@@ -640,6 +640,153 @@ def workflows(db_path, repos, auth):
     utils.ensure_db_shape(db)
 
 
+@cli.command()
+@click.argument(
+    "db_path",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+    required=True,
+)
+@click.argument("owners", type=str, nargs=-1, required=True)
+@click.option(
+    "-a",
+    "--auth",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=True),
+    default="auth.json",
+    help="Path to auth.json token file",
+)
+@click.option(
+    "-n",
+    "--number",
+    type=int,
+    multiple=True,
+    help="Project numbers to fetch, defaults to every project of the owner",
+)
+@click.option("--closed", is_flag=True, help="Include closed projects")
+def projects(db_path, owners, auth, number, closed):
+    "Save GitHub Projects (v2) and their items for the specified users or organizations"
+    db = sqlite_utils.Database(db_path)
+    token = load_token(auth)
+    for owner in owners:
+        for project in utils.fetch_projects(owner, token):
+            if number and project["number"] not in number:
+                continue
+            if project["closed"] and not closed:
+                continue
+            project_id = utils.save_project(db, owner, project)
+            items = utils.fetch_project_items(owner, project["number"], token)
+            count = utils.save_project_items(db, project_id, items)
+            click.echo("{}/{}: {} items".format(owner, project["title"], count))
+    utils.ensure_db_shape(db)
+
+
+@cli.command()
+@click.argument(
+    "db_path",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+    required=True,
+)
+@click.option("--event", required=True, help="Value of the X-GitHub-Event header")
+@click.option(
+    "--payload", type=click.File("r"), default="-", help="Webhook payload, defaults to stdin"
+)
+def webhook(db_path, event, payload):
+    "Save the object delivered by a GitHub webhook, without calling the API"
+    data = json.load(payload)
+    repo = data.get("repository")
+    if not repo:
+        raise click.ClickException("payload has no repository")
+    db = sqlite_utils.Database(db_path)
+    utils.save_repo(db, repo)
+    # Удаление приходит тем же событием: зеркало обязано терять то, чего в GitHub больше нет.
+    deleted = data.get("action") == "deleted"
+    if event == "issues" and data.get("issue"):
+        if deleted:
+            db["issues"].delete_where("id = ?", [data["issue"]["id"]])
+        else:
+            utils.save_issues(db, [data["issue"]], repo)
+    elif event == "pull_request" and data.get("pull_request"):
+        utils.save_pull_requests(db, [data["pull_request"]], repo)
+    elif event == "pull_request_review" and data.get("review"):
+        number = data["pull_request"]["number"]
+        utils.save_reviews(db, repo["id"], [(number, {
+            "databaseId": data["review"]["id"],
+            "state": data["review"]["state"].upper(),
+            "body": data["review"].get("body"),
+            "author": {"login": (data["review"].get("user") or {}).get("login")},
+            "submittedAt": data["review"].get("submitted_at"),
+            "commit": {"oid": data["review"].get("commit_id")},
+            "url": data["review"].get("html_url"),
+        })])
+    elif event == "pull_request_review_comment" and data.get("comment"):
+        utils.save_review_comments(db, repo["id"], [data["comment"]])
+    elif event == "milestone" and data.get("milestone"):
+        utils.save_milestone(db, data["milestone"], repo["id"])
+    elif event == "repository":
+        pass  # save_repo выше — это и есть всё содержимое события
+    elif event == "issue_comment" and data.get("comment"):
+        if data.get("issue") and not deleted:
+            utils.save_issues(db, [data["issue"]], repo)
+        if deleted:
+            db["issue_comments"].delete_where("id = ?", [data["comment"]["id"]])
+        else:
+            utils.save_issue_comment(db, data["comment"])
+    else:
+        raise click.ClickException("nothing to save for event {}".format(event))
+    utils.ensure_db_shape(db)
+
+
+@cli.command()
+@click.argument(
+    "db_path",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+    required=True,
+)
+@click.argument("repos", type=str, nargs=-1, required=True)
+@click.option(
+    "-a",
+    "--auth",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=True),
+    default="auth.json",
+    help="Path to auth.json token file",
+)
+def branches(db_path, repos, auth):
+    "Save branches for the specified repos, with their head commit and pull request"
+    db = sqlite_utils.Database(db_path)
+    token = load_token(auth)
+    for full_name in repos:
+        repo_id = utils.save_repo(db, utils.fetch_repo(full_name, token))
+        count = utils.save_branches(db, repo_id, utils.fetch_branches(full_name, token))
+        click.echo("{}: {} branches".format(full_name, count))
+    utils.ensure_db_shape(db)
+
+
+@cli.command()
+@click.argument(
+    "db_path",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+    required=True,
+)
+@click.argument("repos", type=str, nargs=-1, required=True)
+@click.option(
+    "-a",
+    "--auth",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=True),
+    default="auth.json",
+    help="Path to auth.json token file",
+)
+@click.option("--pages", type=int, default=None, help="Stop after this many pages of pull requests")
+def reviews(db_path, repos, auth, pages):
+    "Save pull request reviews and their inline comments for the specified repos"
+    db = sqlite_utils.Database(db_path)
+    token = load_token(auth)
+    for full_name in repos:
+        repo_id = utils.save_repo(db, utils.fetch_repo(full_name, token))
+        verdicts = utils.save_reviews(db, repo_id, utils.fetch_reviews(full_name, token, pages))
+        inline = utils.save_review_comments(db, repo_id, utils.fetch_review_comments(full_name, token))
+        click.echo("{}: {} reviews, {} inline comments".format(full_name, verdicts, inline))
+    utils.ensure_db_shape(db)
+
+
 def load_token(auth):
     try:
         token = json.load(open(auth))["github_personal_token"]

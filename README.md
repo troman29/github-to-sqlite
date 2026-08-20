@@ -14,12 +14,16 @@ Save data from GitHub to a SQLite database.
 - [Authentication](#authentication)
 - [Fetching issues for a repository](#fetching-issues-for-a-repository)
 - [Fetching pull requests for a repository](#fetching-pull-requests-for-a-repository)
+- [Fetching pull request reviews](#fetching-pull-request-reviews)
 - [Fetching issue comments for a repository](#fetching-issue-comments-for-a-repository)
 - [Fetching commits for a repository](#fetching-commits-for-a-repository)
+- [Fetching branches for a repository](#fetching-branches-for-a-repository)
 - [Fetching releases for a repository](#fetching-releases-for-a-repository)
 - [Fetching tags for a repository](#fetching-tags-for-a-repository)
 - [Fetching contributors to a repository](#fetching-contributors-to-a-repository)
 - [Fetching repos belonging to a user or organization](#fetching-repos-belonging-to-a-user-or-organization)
+- [Fetching projects and their items](#fetching-projects-and-their-items)
+- [Saving a webhook delivery](#saving-a-webhook-delivery)
 - [Fetching specific repositories](#fetching-specific-repositories)
 - [Fetching repos that have been starred by a user](#fetching-repos-that-have-been-starred-by-a-user)
 - [Fetching users that have starred specific repos](#fetching-users-that-have-starred-specific-repos)
@@ -68,6 +72,9 @@ You can use the `--issue` option one or more times to load specific issues:
 
 Example: [issues table](https://github-to-sqlite.dogsheep.net/github/issues)
 
+GitHub's own issue type (`Task`, `Bug`, `Epic`, …) is stored in `issue_type`. The `type` column
+belongs to this tool and says `issue` or `pull` — the two would otherwise collide.
+
 ## Fetching pull requests for a repository
 
 While pull requests are a type of issue, you will get more information on pull requests by pulling them separately. For example, whether a pull request has been merged and when.
@@ -96,6 +103,19 @@ You can use a search query to find pull requests.  Note that no more than 1000 w
 
 Example: [pull_requests table](https://github-to-sqlite.dogsheep.net/github/pull_requests)
 
+## Fetching pull request reviews
+
+    $ github-to-sqlite reviews github.db windbit/agentek-console
+
+Saves review verdicts (`APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED`) into `reviews`
+and the inline comments on the diff into `review_comments`. Verdicts come from GraphQL, walking
+pull requests newest-first — REST offers them per pull request only, which would be hundreds of
+calls; `--pages N` stops after N pages of 25 pull requests, which is what a periodic refresh wants.
+Inline comments come from the repository-wide REST endpoint in one paginated sweep.
+
+Both tables point at `pull_requests` when the pull request is already in the database, and keep
+the repo and number regardless, so a review saved before its pull request is not lost.
+
 ## Fetching issue comments for a repository
 
 The `issue-comments` command retrieves all of the comments on all of the issues in a repository.
@@ -122,6 +142,51 @@ The command accepts one or more repositories.
 By default it will stop as soon as it sees a commit that has previously been retrieved. You can force it to retrieve all commits (including those that have been previously inserted) using `--all`.
 
 Example: [commits table](https://github-to-sqlite.dogsheep.net/github/commits)
+
+## Fetching projects and their items
+
+The `projects` command saves GitHub Projects (v2) of a user or an organization together with their
+items — issues, pull requests and drafts — including the board column each item sits in:
+
+    $ github-to-sqlite projects github.db windbit
+
+Closed projects are skipped unless you pass `--closed`; `-n/--number` limits the run to specific
+project numbers:
+
+    $ github-to-sqlite projects github.db windbit -n 3
+
+Items land in `project_items` with `status` (the Status field), `assignees`, the `repo`/`number` of
+the underlying issue and a `fields` column holding every custom field value as JSON — so a board
+with Priority or Estimate keeps them without a schema change.
+
+This command talks to the GraphQL API: Projects v2 have no REST equivalent.
+
+## Saving a webhook delivery
+
+`issues`, `issue_comment` and `pull_request` webhooks carry the whole object, so there is nothing
+to fetch: pipe the delivery straight into the database and no API call is made at all.
+
+    $ github-to-sqlite webhook github.db --event issues < payload.json
+
+`--event` takes the value of the `X-GitHub-Event` header; the payload is read from stdin unless
+`--payload` points at a file. An event that carries no object of its own (`push`, for example)
+exits non-zero — refresh those with the regular commands, which are incremental anyway.
+
+`milestone` events are saved too, so a renamed or closed milestone does not wait for the next
+issue that happens to carry it.
+
+Every action of those events is covered, because the payload always carries the current object:
+a renamed title, a label added or removed, an assignee, a closed issue. A `deleted` action removes
+the row instead of saving it, and labels are stored as the object's current set — a label taken off
+an issue disappears from `issues_labels` rather than lingering.
+
+## Fetching branches for a repository
+
+    $ github-to-sqlite branches github.db windbit/agentek-console
+
+Each branch is saved with its head commit (sha, date, headline, author) and the pull request it
+belongs to, if any — enough to tell a merged leftover from work in progress without cloning. One
+GraphQL call per 100 branches. A branch that no longer exists is removed from the table.
 
 ## Fetching releases for a repository
 
