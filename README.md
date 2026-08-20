@@ -72,6 +72,9 @@ You can use the `--issue` option one or more times to load specific issues:
 
 Example: [issues table](https://github-to-sqlite.dogsheep.net/github/issues)
 
+GitHub's own issue type (`Task`, `Bug`, `Epic`, …) is stored in `issue_type`. The `type` column
+belongs to this tool and says `issue` or `pull` — the two would otherwise collide.
+
 ## Fetching pull requests for a repository
 
 While pull requests are a type of issue, you will get more information on pull requests by pulling them separately. For example, whether a pull request has been merged and when.
@@ -168,6 +171,9 @@ to fetch: pipe the delivery straight into the database and no API call is made a
 `--event` takes the value of the `X-GitHub-Event` header; the payload is read from stdin unless
 `--payload` points at a file. An event that carries no object of its own (`push`, for example)
 exits non-zero — refresh those with the regular commands, which are incremental anyway.
+
+`milestone` events are saved too, so a renamed or closed milestone does not wait for the next
+issue that happens to carry it.
 
 Every action of those events is covered, because the payload always carries the current object:
 a renamed title, a label added or removed, an assignee, a closed issue. A `deleted` action removes

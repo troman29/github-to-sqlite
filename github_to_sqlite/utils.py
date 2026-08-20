@@ -126,7 +126,10 @@ def save_issues(db, issues, repo):
         issue["assignees"] = assignee_logins(issue.pop("assignees", None))
         if issue["assignee"]:
             issue["assignee"] = save_user(db, issue["assignee"])
-        # Add a type field to distinguish issues from pulls
+        # GitHub с 2025-го отдаёт СВОЙ type (Task, Bug, Epic…) — тем же именем, каким тула метит
+        # задачу против PR. Забираем его отдельной колонкой, иначе он затирается меткой.
+        original_type = issue.get("type")
+        issue["issue_type"] = original_type.get("name") if isinstance(original_type, dict) else None
         issue["type"] = "pull" if issue.get("pull_request") else "issue"
         # Insert record
         table = db["issues"].insert(

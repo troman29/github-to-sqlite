@@ -719,6 +719,8 @@ def webhook(db_path, event, payload):
         })])
     elif event == "pull_request_review_comment" and data.get("comment"):
         utils.save_review_comments(db, repo["id"], [data["comment"]])
+    elif event == "milestone" and data.get("milestone"):
+        utils.save_milestone(db, data["milestone"], repo["id"])
     elif event == "repository":
         pass  # save_repo выше — это и есть всё содержимое события
     elif event == "issue_comment" and data.get("comment"):

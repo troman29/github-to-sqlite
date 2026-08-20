@@ -120,6 +120,27 @@ def test_inline_review_comment_event_is_saved(tmp_path):
     assert db["review_comments"].get(11)["path"] == "a.py"
 
 
+def test_issue_type_survives_the_internal_marker(tmp_path):
+    typed = {**issue(), "type": {"id": 1, "name": "Bug", "color": "red"}}
+    _, db = run(tmp_path, "issues", {"action": "opened", "issue": typed, "repository": REPO})
+    row = db["issues"].get(905)
+    assert row["issue_type"] == "Bug"
+    assert row["type"] == "issue"  # метка тулы «задача против PR» на месте
+
+
+def test_milestone_event_is_saved(tmp_path):
+    payload = {
+        "action": "edited",
+        "milestone": {"id": 77, "number": 3, "title": "0.5", "description": "", "state": "open",
+                      "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-02T00:00:00Z",
+                      "due_on": None, "closed_at": None, "creator": USER, "open_issues": 4, "closed_issues": 1},
+        "repository": REPO,
+    }
+    result, db = run(tmp_path, "milestone", payload)
+    assert result.exit_code == 0, result.output
+    assert db["milestones"].get(77)["title"] == "0.5"
+
+
 def test_unknown_event_fails_loudly(tmp_path):
     result, _ = run(tmp_path, "star", {"repository": REPO})
     assert result.exit_code != 0
