@@ -157,6 +157,28 @@ def save_issues(db, issues, repo):
             table.m2m("labels", label, pk="id")
 
 
+# Статистику диффа и счётчики списочная ручка PR не отдаёт — они приезжают только из детальной
+# ручки и из вебхука. `replace=True` ниже затирает колонку, которой нет в записи, поэтому уже
+# известные значения переносим в новую запись руками.
+PR_DETAIL_ONLY = ("additions", "deletions", "changed_files", "commits", "comments",
+                  "review_comments", "maintainer_can_modify", "mergeable", "mergeable_state",
+                  "rebaseable", "merged")
+
+
+def keep_pull_request_details(db, pull_request):
+    if not db["pull_requests"].exists():
+        return
+    missing = [column for column in PR_DETAIL_ONLY if pull_request.get(column) is None]
+    if not missing:
+        return
+    known = list(db["pull_requests"].rows_where("id = ?", [pull_request["id"]]))
+    if not known:
+        return
+    for column in missing:
+        if known[0].get(column) is not None:
+            pull_request[column] = known[0][column]
+
+
 def save_pull_requests(db, pull_requests, repo):
     if "milestones" not in db.table_names():
         if "users" not in db.table_names():
@@ -203,6 +225,7 @@ def save_pull_requests(db, pull_requests, repo):
         # ignore requested_reviewers and requested_teams
         pull_request.pop("requested_reviewers", None)
         pull_request.pop("requested_teams", None)
+        keep_pull_request_details(db, pull_request)
         # Insert record
         table = db["pull_requests"].insert(
             pull_request,

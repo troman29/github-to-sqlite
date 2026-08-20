@@ -140,3 +140,18 @@ def test_foreign_keys(db):
             table="pull_requests", column="user", other_table="users", other_column="id"
         ),
     ]
+
+
+def test_detail_fields_survive_list_refresh(db, pull_requests):
+    """Списочная ручка не отдаёт статистику диффа, а запись перезаписывается целиком: уже
+    известные строки кода обязаны пережить очередной прогон синка."""
+    pull_id = pull_requests[0]["id"]
+    db["pull_requests"].update(pull_id, {"additions": 42, "deletions": 7, "changed_files": 3})
+    from_list = [{key: value for key, value in pull.items()
+                  if key not in ("additions", "deletions", "changed_files")}
+                 for pull in pull_requests]
+
+    utils.save_pull_requests(db, from_list, {"id": 1})
+
+    row = db["pull_requests"].get(pull_id)
+    assert (row["additions"], row["deletions"], row["changed_files"]) == (42, 7, 3)
