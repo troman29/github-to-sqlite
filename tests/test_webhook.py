@@ -90,6 +90,36 @@ def test_deleted_issue_is_removed(tmp_path):
     assert sqlite_utils.Database(db_path)["issues"].count == 0
 
 
+def test_review_event_is_saved(tmp_path):
+    payload = {
+        "action": "submitted",
+        "review": {"id": 4, "state": "approved", "body": "ок", "user": USER,
+                   "submitted_at": "2026-08-19T10:00:00Z", "commit_id": "abc",
+                   "html_url": "https://github.com/windbit/issues/pull/5#pullrequestreview-4"},
+        "pull_request": {"number": 5},
+        "repository": REPO,
+    }
+    result, db = run(tmp_path, "pull_request_review", payload)
+    assert result.exit_code == 0, result.output
+    assert db["reviews"].get(4)["state"] == "APPROVED"  # REST шлёт строчными, приводим к виду GraphQL
+
+
+def test_inline_review_comment_event_is_saved(tmp_path):
+    payload = {
+        "action": "created",
+        "comment": {"id": 11, "pull_request_review_id": 4, "user": USER, "path": "a.py", "line": 3,
+                    "body": "тут null", "created_at": "2026-08-19T10:01:00Z",
+                    "updated_at": "2026-08-19T10:01:00Z",
+                    "pull_request_url": "https://api.github.com/repos/windbit/issues/pulls/5",
+                    "html_url": "https://github.com/windbit/issues/pull/5#discussion_r11"},
+        "pull_request": {"number": 5},
+        "repository": REPO,
+    }
+    result, db = run(tmp_path, "pull_request_review_comment", payload)
+    assert result.exit_code == 0, result.output
+    assert db["review_comments"].get(11)["path"] == "a.py"
+
+
 def test_unknown_event_fails_loudly(tmp_path):
     result, _ = run(tmp_path, "star", {"repository": REPO})
     assert result.exit_code != 0

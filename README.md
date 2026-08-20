@@ -14,6 +14,7 @@ Save data from GitHub to a SQLite database.
 - [Authentication](#authentication)
 - [Fetching issues for a repository](#fetching-issues-for-a-repository)
 - [Fetching pull requests for a repository](#fetching-pull-requests-for-a-repository)
+- [Fetching pull request reviews](#fetching-pull-request-reviews)
 - [Fetching issue comments for a repository](#fetching-issue-comments-for-a-repository)
 - [Fetching commits for a repository](#fetching-commits-for-a-repository)
 - [Fetching branches for a repository](#fetching-branches-for-a-repository)
@@ -98,6 +99,19 @@ You can use a search query to find pull requests.  Note that no more than 1000 w
     $ github-to-sqlite pull-requests --search='org:python defaultdict state:closed created:<2023-09-01' github.db
 
 Example: [pull_requests table](https://github-to-sqlite.dogsheep.net/github/pull_requests)
+
+## Fetching pull request reviews
+
+    $ github-to-sqlite reviews github.db windbit/agentek-console
+
+Saves review verdicts (`APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED`) into `reviews`
+and the inline comments on the diff into `review_comments`. Verdicts come from GraphQL, walking
+pull requests newest-first — REST offers them per pull request only, which would be hundreds of
+calls; `--pages N` stops after N pages of 25 pull requests, which is what a periodic refresh wants.
+Inline comments come from the repository-wide REST endpoint in one paginated sweep.
+
+Both tables point at `pull_requests` when the pull request is already in the database, and keep
+the repo and number regardless, so a review saved before its pull request is not lost.
 
 ## Fetching issue comments for a repository
 

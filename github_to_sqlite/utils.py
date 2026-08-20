@@ -1156,3 +1156,112 @@ def save_branches(db, repo_id, branches):
             sql += " and id not in ({})".format(",".join("?" * len(keep)))
         db["branches"].delete_where(sql, [repo_id, *keep])
     return len(rows)
+
+
+REVIEWS_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 25, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        reviews(first: 20) {
+          nodes { databaseId state body submittedAt url author { login } commit { oid } }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_reviews(full_name, token, pages=None):
+    """Вердикты ревью пачкой: по REST их отдают только поштучно на каждый PR, это сотни запросов."""
+    owner, name = full_name.split("/")
+    cursor, page = None, 0
+    while pages is None or page < pages:
+        repository = graphql(REVIEWS_QUERY, {"owner": owner, "name": name, "cursor": cursor}, token)["repository"]
+        if not repository:
+            return
+        chunk = repository["pullRequests"]
+        for pull_request in chunk["nodes"]:
+            for review in pull_request["reviews"]["nodes"]:
+                yield pull_request["number"], review
+        page += 1
+        if not chunk["pageInfo"]["hasNextPage"]:
+            return
+        cursor = chunk["pageInfo"]["endCursor"]
+
+
+def ensure_review_tables(db):
+    # Ревью может приехать вебхуком раньше, чем синк создаст сами таблицы, — вешать внешний
+    # ключ будет некуда; заводим заглушки, как это делает save_issues для milestones.
+    for table, columns in (("repos", {"id": int}), ("pull_requests", {"id": int, "repo": int, "number": int})):
+        if table not in db.table_names():
+            db[table].create(columns, pk="id")
+
+
+def pull_request_id(db, repo_id, number):
+    rows = list(db["pull_requests"].rows_where("repo = ? and number = ?", [repo_id, number]))
+    return rows[0]["id"] if rows else None
+
+
+def save_reviews(db, repo_id, reviews):
+    ensure_review_tables(db)
+    rows = []
+    for number, review in reviews:
+        if not review.get("databaseId"):
+            continue
+        rows.append(
+            {
+                "id": review["databaseId"],
+                "pull_request": pull_request_id(db, repo_id, number),
+                "repo": repo_id,
+                "number": number,
+                "state": review["state"],
+                "body": review.get("body") or None,
+                "author": (review.get("author") or {}).get("login"),
+                "submitted_at": review.get("submittedAt"),
+                "commit": (review.get("commit") or {}).get("oid"),
+                "url": review.get("url"),
+            }
+        )
+    if rows:
+        db["reviews"].insert_all(rows, pk="id", alter=True, replace=True,
+                                 foreign_keys=[("pull_request", "pull_requests", "id"), ("repo", "repos", "id")])
+    return len(rows)
+
+
+def save_review_comments(db, repo_id, comments):
+    ensure_review_tables(db)
+    rows = []
+    for comment in comments:
+        number = int(comment["pull_request_url"].rsplit("/", 1)[1])
+        rows.append(
+            {
+                "id": comment["id"],
+                "review": comment.get("pull_request_review_id"),
+                "pull_request": pull_request_id(db, repo_id, number),
+                "repo": repo_id,
+                "number": number,
+                "author": (comment.get("user") or {}).get("login"),
+                "path": comment.get("path"),
+                "line": comment.get("line") or comment.get("original_line"),
+                "body": comment.get("body"),
+                "created_at": comment.get("created_at"),
+                "updated_at": comment.get("updated_at"),
+                "url": comment.get("html_url"),
+                "in_reply_to": comment.get("in_reply_to_id"),
+            }
+        )
+    if rows:
+        db["review_comments"].insert_all(rows, pk="id", alter=True, replace=True,
+                                         foreign_keys=[("pull_request", "pull_requests", "id"), ("repo", "repos", "id")])
+    return len(rows)
+
+
+def fetch_review_comments(full_name, token):
+    """Инлайновые замечания отдаются ЦЕЛИКОМ по репозиторию — не надо ходить по каждому PR."""
+    url = "https://api.github.com/repos/{}/pulls/comments".format(full_name)
+    for page in paginate(url, make_headers(token)):  # paginate отдаёт СТРАНИЦЫ, не элементы
+        yield from page

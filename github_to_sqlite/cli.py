@@ -706,6 +706,19 @@ def webhook(db_path, event, payload):
             utils.save_issues(db, [data["issue"]], repo)
     elif event == "pull_request" and data.get("pull_request"):
         utils.save_pull_requests(db, [data["pull_request"]], repo)
+    elif event == "pull_request_review" and data.get("review"):
+        number = data["pull_request"]["number"]
+        utils.save_reviews(db, repo["id"], [(number, {
+            "databaseId": data["review"]["id"],
+            "state": data["review"]["state"].upper(),
+            "body": data["review"].get("body"),
+            "author": {"login": (data["review"].get("user") or {}).get("login")},
+            "submittedAt": data["review"].get("submitted_at"),
+            "commit": {"oid": data["review"].get("commit_id")},
+            "url": data["review"].get("html_url"),
+        })])
+    elif event == "pull_request_review_comment" and data.get("comment"):
+        utils.save_review_comments(db, repo["id"], [data["comment"]])
     elif event == "repository":
         pass  # save_repo выше — это и есть всё содержимое события
     elif event == "issue_comment" and data.get("comment"):
@@ -742,6 +755,33 @@ def branches(db_path, repos, auth):
         repo_id = utils.save_repo(db, utils.fetch_repo(full_name, token))
         count = utils.save_branches(db, repo_id, utils.fetch_branches(full_name, token))
         click.echo("{}: {} branches".format(full_name, count))
+    utils.ensure_db_shape(db)
+
+
+@cli.command()
+@click.argument(
+    "db_path",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+    required=True,
+)
+@click.argument("repos", type=str, nargs=-1, required=True)
+@click.option(
+    "-a",
+    "--auth",
+    type=click.Path(file_okay=True, dir_okay=False, allow_dash=True),
+    default="auth.json",
+    help="Path to auth.json token file",
+)
+@click.option("--pages", type=int, default=None, help="Stop after this many pages of pull requests")
+def reviews(db_path, repos, auth, pages):
+    "Save pull request reviews and their inline comments for the specified repos"
+    db = sqlite_utils.Database(db_path)
+    token = load_token(auth)
+    for full_name in repos:
+        repo_id = utils.save_repo(db, utils.fetch_repo(full_name, token))
+        verdicts = utils.save_reviews(db, repo_id, utils.fetch_reviews(full_name, token, pages))
+        inline = utils.save_review_comments(db, repo_id, utils.fetch_review_comments(full_name, token))
+        click.echo("{}: {} reviews, {} inline comments".format(full_name, verdicts, inline))
     utils.ensure_db_shape(db)
 
 
