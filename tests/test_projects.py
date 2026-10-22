@@ -89,3 +89,32 @@ def test_items_are_replaced_not_duplicated():
     utils.save_project_items(db, project_id, [moved])
     assert db["project_items"].count == 1
     assert db["project_items"].get("PVTI_1")["status"] == "Done"
+
+
+def test_incomplete_pass_removes_nothing():
+    db = sqlite_utils.Database(memory=True)
+    project_id = utils.save_project(db, "windbit", PROJECT)
+    utils.save_project_items(db, project_id, [ITEM, DRAFT])
+    utils.save_project_items(db, project_id, [ITEM], complete=False)
+    assert {row["id"] for row in db["project_items"].rows} == {"PVTI_1", "PVTI_2"}
+
+
+def test_fetch_retries_a_short_pass(monkeypatch):
+    def page(nodes, total):
+        return {"repositoryOwner": {"projectV2": {"items": {
+            "totalCount": total, "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}
+
+    passes = iter([page([ITEM], 2), page([ITEM, DRAFT], 2)])
+    monkeypatch.setattr(utils, "graphql", lambda query, variables, token: next(passes))
+    items, complete = utils.fetch_project_items("windbit", 3, "token")
+    assert complete and len(items) == 2
+
+
+def test_fetch_gives_up_without_removing(monkeypatch):
+    def short(query, variables, token):
+        return {"repositoryOwner": {"projectV2": {"items": {
+            "totalCount": 2, "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [ITEM]}}}}
+
+    monkeypatch.setattr(utils, "graphql", short)
+    items, complete = utils.fetch_project_items("windbit", 3, "token")
+    assert not complete and [item["id"] for item in items] == ["PVTI_1"]

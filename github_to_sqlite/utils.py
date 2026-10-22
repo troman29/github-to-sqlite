@@ -968,12 +968,15 @@ query($owner: String!, $cursor: String) {
 }
 """
 
+PROJECT_ITEMS_ATTEMPTS = 3
+
 PROJECT_ITEMS_QUERY = """
 query($owner: String!, $number: Int!, $cursor: String) {
   repositoryOwner(login: $owner) {
     ... on ProjectV2Owner {
       projectV2(number: $number) {
         items(first: 100, after: $cursor) {
+          totalCount
           pageInfo { hasNextPage endCursor }
           nodes {
             id type createdAt updatedAt
@@ -1044,19 +1047,38 @@ def fetch_projects(owner, token):
         cursor = page["pageInfo"]["endCursor"]
 
 
-def fetch_project_items(owner, number, token):
-    cursor = None
+def fetch_project_items(owner, number, token, attempts=PROJECT_ITEMS_ATTEMPTS):
+    """Все карточки доски и признак, что пришли все: `(items, complete)`.
+
+    GitHub временами обрывает пагинацию доски раньше конца, отдавая `hasNextPage: false` на
+    300-й или 400-й карточке из 546. Сверяемся с `totalCount` и повторяем проход; не сошлось за
+    `attempts` — отдаём самый полный и `complete=False`, чтобы не стереть из зеркала живые карточки."""
+    best = []
+    for _ in range(attempts):
+        items, total = _project_items_pass(owner, number, token)
+        if len(items) > len(best):
+            best = items
+        if total is None or len(items) >= total:
+            return items, True
+    return best, False
+
+
+def _project_items_pass(owner, number, token):
+    cursor, items, total = None, {}, None
     while True:
         owner_data = graphql(
             PROJECT_ITEMS_QUERY, {"owner": owner, "number": number, "cursor": cursor}, token
         )["repositoryOwner"]
         project = (owner_data or {}).get("projectV2")
         if not project:
-            return
+            return list(items.values()), total
         page = project["items"]
-        yield from page["nodes"]
+        if total is None:
+            total = page.get("totalCount")
+        for node in page["nodes"]:
+            items[node["id"]] = node
         if not page["pageInfo"]["hasNextPage"]:
-            return
+            return list(items.values()), total
         cursor = page["pageInfo"]["endCursor"]
 
 
@@ -1076,7 +1098,7 @@ def save_project(db, owner, project):
     return row["id"]
 
 
-def save_project_items(db, project_id, items):
+def save_project_items(db, project_id, items, complete=True):
     rows = []
     for item in items:
         content = item.get("content") or {}
@@ -1104,8 +1126,8 @@ def save_project_items(db, project_id, items):
             rows, pk="id", alter=True, replace=True, foreign_keys=[("project", "projects", "id")]
         )
     # Карточку могли снять с доски или перенести в другой проект — прогон видит проект целиком,
-    # поэтому всё, чего в нём больше нет, из зеркала уходит.
-    if db["project_items"].exists():
+    # поэтому всё, чего в нём больше нет, из зеркала уходит. Неполный прогон ничего не удаляет.
+    if complete and db["project_items"].exists():
         keep = [row["id"] for row in rows]
         sql = "project = ?"
         if keep:

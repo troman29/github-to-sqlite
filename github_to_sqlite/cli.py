@@ -673,9 +673,10 @@ def projects(db_path, owners, auth, number, closed):
             if project["closed"] and not closed:
                 continue
             project_id = utils.save_project(db, owner, project)
-            items = utils.fetch_project_items(owner, project["number"], token)
-            count = utils.save_project_items(db, project_id, items)
-            click.echo("{}/{}: {} items".format(owner, project["title"], count))
+            items, complete = utils.fetch_project_items(owner, project["number"], token)
+            count = utils.save_project_items(db, project_id, items, complete)
+            click.echo("{}/{}: {} items{}".format(
+                owner, project["title"], count, "" if complete else " (incomplete, nothing removed)"))
     utils.ensure_db_shape(db)
 
 
