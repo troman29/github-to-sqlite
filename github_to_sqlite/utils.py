@@ -154,7 +154,7 @@ def save_issues(db, issues, repo):
         )
         prune_labels(db, "issues_labels", "issues_id", issue["id"], labels)
         for label in labels:
-            table.m2m("labels", label, pk="id")
+            table.m2m("labels", label, pk="id", alter=True)
 
 
 # Статистику диффа и счётчики списочная ручка PR не отдаёт — они приезжают только из детальной
@@ -251,7 +251,7 @@ def save_pull_requests(db, pull_requests, repo):
         )
         prune_labels(db, "labels_pull_requests", "pull_requests_id", pull_request["id"], labels)
         for label in labels:
-            table.m2m("labels", label, pk="id")
+            table.m2m("labels", label, pk="id", alter=True)
 
 
 def prune_labels(db, m2m_table, column, row_id, labels):

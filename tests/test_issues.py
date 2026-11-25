@@ -4,6 +4,7 @@ import pathlib
 import sqlite_utils
 from sqlite_utils.db import ForeignKey
 import json
+from copy import deepcopy
 
 
 @pytest.fixture
@@ -44,6 +45,16 @@ def test_tables(db):
             table="issues", column="user", other_table="users", other_column="id"
         ),
     } == set(db["issues"].foreign_keys)
+
+
+def test_existing_label_table_accepts_new_github_fields(db, issues):
+    issue = deepcopy(issues[0])
+    issue["labels"][0]["archived_at"] = "2026-11-25T00:00:00Z"
+    issue["labels"][0]["archived_by"] = None
+
+    utils.save_issues(db, [issue], {"id": 1})
+
+    assert next(db["labels"].rows)["archived_at"] == "2026-11-25T00:00:00Z"
 
 
 def test_issues(db):
